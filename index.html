@@ -641,9 +641,7 @@
       reader.readAsText(file);
     }
 
-    function loadSavedZone(zone) {
-      if (!zone.points || zone.points.length === 0 || (zone.options?.web?.type !== 'polygon' && zone.options?.web?.type !== 'rectangle')) return;
-
+    function loadZoneIntoPolygon(zone) {
       // Convert saved points back to Leaflet lat-lngs
       const latlngs = zone.points.map((pt) => gtaToLatLng(pt.x, pt.y));
 
@@ -651,6 +649,20 @@
       let content = parseShape2(zone);
       const layerOptions = zone.options.web?.debugColor ? { color: zone.options.web.debugColor } : undefined;
       const layer = L.polygon(latlngs, layerOptions);
+
+      return { content, layer };
+    }
+
+    function loadSavedZone(zone) {
+      if (!zone.points || zone.points.length === 0 || (zone.options?.web?.type !== 'polygon' && zone.options?.web?.type !== 'rectangle')) return;
+
+      // Convert saved points back to Leaflet lat-lngs
+      const latlngs = zone.points.map((pt) => gtaToLatLng(pt.x, pt.y));
+
+      // Add polygon to map (and to editableLayers for editing)
+      const loadedPolygon = loadZoneIntoPolygon(zone);
+      let { content } = loadedPolygon;
+      const { layer } = loadedPolygon;
       const popupContent = setupPopupContent(content, zone);
 
       layer.bindPopup(popupContent, { minWidth: 500, interactive: true });
