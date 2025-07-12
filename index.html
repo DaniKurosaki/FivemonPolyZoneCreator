@@ -103,6 +103,11 @@
     Overlay Grid
   </button>
 
+  <button class="btn btn-labels" id="toggleLabelsBtn" style="top:2px;right:370px;"
+    onclick="toggleLabels();">
+    Ocultar etiquetas
+  </button>
+
   <div id="controls">
     <!-- <button onclick="saveConfiguration()">Save</button>
     <select id="savedList" onchange="loadConfiguration(this.value)">
@@ -136,6 +141,9 @@
     var bounds = [bottomLeft, topRight];
 
     var zonesList = [];  // global array to track zones
+
+    var labelsVisible = true;
+    var zoneLabels = [];
 
 
     L.Draw.Circle = L.Draw.SimpleShape.extend({
@@ -351,6 +359,10 @@
 
       zonesList = []; // Clear the zones list
       localStorage.removeItem('zones'); // Remove zones from localStorage
+
+      // Eliminar todas las etiquetas
+      zoneLabels.forEach(label => map.removeLayer(label));
+      zoneLabels = [];
     }
 
     //https://github.com/mkafrin/PolyZone/blob/master/server.lua
@@ -437,17 +449,51 @@
           "GTA Position: " + position + ", latlng: " + layer.getLatLng()
         );
       } else if (type === "circle") {
-        var position = latlngToGTA(layer.getLatLng());
-
-        let content = parseCircle(
-          prompt("Enter circlezone name: "),
-          latlngToGTA(layer.getLatLng()),
-          (layer.getRadius() * 1.5).toFixed(2)
-        );
-        layer.bindPopup(
-          "<code style='white-space:pre-wrap;'>" + content + "</code>",
-          { minWidth: 500 }
-        );
+        var name = prompt("Enter circlezone name: ");
+        if (name === null || name === undefined || name.trim() === "" || name.trim().toLowerCase() === "null") {
+          // Asignar nombre automático si es null, undefined, vacío o 'null'
+          let unnamedCount = zonesList.filter(z => z.options?.web?.type === 'circle' && (z.name === null || z.name === undefined || z.name === '' || z.name === 'unnamed_circle')).length;
+          name = `unnamed_circle_${unnamedCount + 1}`;
+        }
+        var debugColor = prompt("Enter circlezone color (CSS):");
+        var center = latlngToGTA(layer.getLatLng());
+        var radius = (layer.getRadius() * 1.5).toFixed(2);
+        const zone = {
+          name,
+          center,
+          radius,
+          options: {
+            minZ: 0,
+            maxZ: 800.00,
+            web: {
+              type: "circle",
+              debugColor
+            }
+          }
+        };
+        zonesList.push(zone);
+        saveZonesIntoLocalStorage(zonesList);
+        let content = parseCircle(name, center, radius);
+        const popupContent = setupPopupContent(content, zone);
+        layer.options.color = debugColor;
+        layer.bindPopup(popupContent, { minWidth: 500, interactive: true });
+        layer.on('popupclose', (e) => content = handleOnPopupClose(e, content, layer, popupContent));
+        // Crear y mostrar la etiqueta si labelsVisible está activo
+        let centerLatLng = gtaToLatLng(center[0], center[1]);
+        let label = L.marker(centerLatLng, {
+          icon: L.divIcon({
+            className: 'zone-label',
+            html: `<span style='background:rgba(255,255,255,0.8);padding:2px 8px;border-radius:3px;font-weight:bold;color:#143c6a;border:1px solid #143c6a;'>${name}</span>`,
+            iconSize: [80, 24],
+            iconAnchor: [40, 12]
+          }),
+          interactive: false
+        });
+        if (labelsVisible) {
+          map.addLayer(label);
+        }
+        zoneLabels.push(label);
+        editableLayers.addLayer(layer);
       } else {
         //Get the polyzone name
         const name = prompt("Enter polyzone name:");
@@ -476,6 +522,52 @@
         layer.options.color = debugColor;
         layer.bindPopup(popupContent, { minWidth: 500, interactive: true });
         layer.on('popupclose', (e) => content = handleOnPopupClose(e, content, layer, popupContent));
+
+        // Crear y mostrar la etiqueta si labelsVisible está activo
+        if (zone.name) {
+          // Calcular centroide geométrico del polígono
+          function getPolygonCentroid(points) {
+            let area = 0, cx = 0, cy = 0;
+            const n = points.length;
+            for (let i = 0; i < n; i++) {
+              let j = (i + 1) % n;
+              let xi = parseFloat(points[i].x), yi = parseFloat(points[i].y);
+              let xj = parseFloat(points[j].x), yj = parseFloat(points[j].y);
+              let a = xi * yj - xj * yi;
+              area += a;
+              cx += (xi + xj) * a;
+              cy += (yi + yj) * a;
+            }
+            area *= 0.5;
+            if (area === 0) {
+              // fallback: promedio de puntos
+              let xSum = 0, ySum = 0;
+              points.forEach(pt => {
+                xSum += parseFloat(pt.x);
+                ySum += parseFloat(pt.y);
+              });
+              return { x: xSum / points.length, y: ySum / points.length };
+            }
+            cx /= (6 * area);
+            cy /= (6 * area);
+            return { x: cx, y: cy };
+          }
+          const centroid = getPolygonCentroid(zone.points);
+          let centerLatLng = gtaToLatLng(centroid.x, centroid.y);
+          let label = L.marker(centerLatLng, {
+            icon: L.divIcon({
+              className: 'zone-label',
+              html: `<span style='background:rgba(255,255,255,0.8);padding:2px 8px;border-radius:3px;font-weight:bold;color:#143c6a;border:1px solid #143c6a;'>${zone.name}</span>`,
+              iconSize: [80, 24],
+              iconAnchor: [40, 12]
+            }),
+            interactive: false
+          });
+          if (labelsVisible) {
+            map.addLayer(label);
+          }
+          zoneLabels.push(label);
+        }
       }
 
       //Add shape to map
@@ -543,6 +635,52 @@
       });
     });
 
+    // Eliminar zonas del localStorage al borrar capas con la papelera de Leaflet.Draw
+    map.on(L.Draw.Event.DELETED, function (e) {
+      // e.layers contiene las capas eliminadas
+      var deletedNames = [];
+      e.layers.eachLayer(function(layer) {
+        // Obtener el nombre de la zona borrada (polígono o círculo)
+        var name = null;
+        if (layer.getPopup && layer.getPopup()) {
+          var popupContent = layer.getPopup().getContent();
+          if (typeof popupContent === 'object' && popupContent.getAttribute) {
+            name = popupContent.getAttribute('zoneName');
+          } else if (typeof popupContent === 'string') {
+            var match = popupContent.match(/name\":\s*\"([^\"]+)/);
+            if (match) name = match[1];
+          }
+        }
+        // Si no se pudo obtener el nombre, intentar buscar por label
+        if (!name && layer instanceof L.Circle) {
+          // Buscar el label en el mismo centro
+          zoneLabels.forEach(label => {
+            if (label.getLatLng && label.getLatLng().lat === layer.getLatLng().lat && label.getLatLng().lng === layer.getLatLng().lng) {
+              var labelName = label.options.icon.options.html.match(/>([^<]+)</);
+              if (labelName) name = labelName[1];
+            }
+          });
+        }
+        if (name) deletedNames.push(name);
+      });
+      // Filtrar las zonas que han sido eliminadas (polígonos y círculos)
+      zonesList = zonesList.filter(function(zone) {
+        return deletedNames.indexOf(zone.name) === -1;
+      });
+      // Guardar el array actualizado en localStorage (solo las zonas restantes)
+      localStorage.setItem('zones', JSON.stringify(zonesList));
+
+      // Eliminar etiquetas de las zonas borradas
+      zoneLabels = zoneLabels.filter(function(label) {
+        var labelName = label.options.icon.options.html.match(/>([^<]+)</);
+        if (labelName && deletedNames.indexOf(labelName[1]) !== -1) {
+          map.removeLayer(label);
+          return false;
+        }
+        return true;
+      });
+    });
+
     //Center the map
     //map.setView(xy(0, 0), 3);
 
@@ -570,7 +708,14 @@
         }
         // Draw each saved zone on the map
         zonesList.forEach((zone) => loadSavedZone(zone));
-
+    // Actualizar visibilidad de etiquetas
+    zoneLabels.forEach(label => {
+      if (labelsVisible) {
+        if (!map.hasLayer(label)) map.addLayer(label);
+      } else {
+        map.removeLayer(label);
+      }
+    });
         console.log(zonesList.length + " zone(s) loaded from localStorage.");
       }
     }
@@ -614,15 +759,33 @@
           alert("Invalid JSON: root element should be an array of zones.");
           return;
         }
-        // Clear current shapes (optional: or merge instead of replace)
+        // Limpiar todo antes de importar
         editableLayers.clearLayers();
+        zoneLabels.forEach(label => map.removeLayer(label));
+        zoneLabels = [];
+        zonesList = [];
+        localStorage.removeItem('zones'); // <-- Asegura que no quedan zonas viejas guardadas
 
-        zones = importedZones.map((zone) => {
-          loadSavedZone(zone);
-
+        // Asignar nombres únicos a cada zona importada
+        const nameSet = new Set();
+        let unnamedCount = 1;
+        const normalizedZones = importedZones.map((zone, idx) => {
+          let name = zone.name;
+          if (name === null || name === undefined || typeof name !== 'string' || name.trim() === '' || name.trim().toLowerCase() === 'null') {
+            name = `imported_zone_${unnamedCount++}`;
+          } else {
+            name = name.trim();
+          }
+          // Si el nombre ya existe, añadir sufijo único SIEMPRE
+          let baseName = name;
+          let suffix = 2;
+          while (nameSet.has(name)) {
+            name = `${baseName}_${suffix++}`;
+          }
+          nameSet.add(name);
           return {
             ...zone,
-            name: zone.name || "unnamed",
+            name,
             points: zone.points,
             options: {
               minZ: zone.options?.minZ || 0,
@@ -635,40 +798,133 @@
           };
         });
 
-        saveZonesIntoLocalStorage(zones);
-        alert(importedZones.length + " zone(s) imported successfully.");
+        normalizedZones.forEach((zone) => {
+          loadSavedZone(zone);
+        });
+
+        saveZonesIntoLocalStorage(normalizedZones);
+        alert(normalizedZones.length + " zone(s) imported successfully.");
       };
       reader.readAsText(file);
     }
 
     function loadZoneIntoPolygon(zone) {
-      // Convert saved points back to Leaflet lat-lngs
-      const latlngs = zone.points.map((pt) => gtaToLatLng(pt.x, pt.y));
-
-      // Add polygon to map (and to editableLayers for editing)
-      let content = parseShape2(zone);
-      const layerOptions = zone.options.web?.debugColor ? { color: zone.options.web.debugColor } : undefined;
-      const layer = L.polygon(latlngs, layerOptions);
-
+      let layer = null;
+      let content = null;
+      let centerLatLng = null;
+      // Solo crear label para CircleZone si no existe ya
+      if (zone.options?.web?.type === 'circle' && zone.center) {
+        centerLatLng = gtaToLatLng(zone.center[0], zone.center[1]);
+        // No crear layer ni label si ya se creó en loadSavedZone
+        if (zoneLabels.some(l => l.options.icon.options.html.includes(zone.name))) {
+          return { content, layer };
+        }
+        let label = L.marker(centerLatLng, {
+          icon: L.divIcon({
+            className: 'zone-label',
+            html: `<span style='background:rgba(255,255,255,0.8);padding:2px 8px;border-radius:3px;font-weight:bold;color:#143c6a;border:1px solid #143c6a;'>${zone.name}</span>`,
+            iconSize: [80, 24],
+            iconAnchor: [40, 12]
+          }),
+          interactive: false
+        });
+        if (labelsVisible) {
+          map.addLayer(label);
+        }
+        zoneLabels.push(label);
+        return { content, layer };
+      }
+      // Polígonos y rectángulos
+      if (zone.options?.web?.type === 'polygon' || zone.options?.web?.type === 'rectangle') {
+        const latlngs = zone.points.map((pt) => gtaToLatLng(pt.x, pt.y));
+        layer = L.polygon(latlngs, zone.options.web?.debugColor ? { color: zone.options.web.debugColor } : undefined);
+        content = parseShape2(zone);
+        // Calcular centroide geométrico del polígono
+        function getPolygonCentroid(points) {
+          let area = 0, cx = 0, cy = 0;
+          const n = points.length;
+          for (let i = 0; i < n; i++) {
+            let j = (i + 1) % n;
+            let xi = parseFloat(points[i].x), yi = parseFloat(points[i].y);
+            let xj = parseFloat(points[j].x), yj = parseFloat(points[j].y);
+            let a = xi * yj - xj * yi;
+            area += a;
+            cx += (xi + xj) * a;
+            cy += (yi + yj) * a;
+          }
+          area *= 0.5;
+          if (area === 0) {
+            // fallback: promedio de puntos
+            let xSum = 0, ySum = 0;
+            points.forEach(pt => {
+              xSum += parseFloat(pt.x);
+              ySum += parseFloat(pt.y);
+            });
+            return { x: xSum / points.length, y: ySum / points.length };
+          }
+          cx /= (6 * area);
+          cy /= (6 * area);
+          return { x: cx, y: cy };
+        }
+        const centroid = getPolygonCentroid(zone.points);
+        centerLatLng = gtaToLatLng(centroid.x, centroid.y);
+        let label = L.marker(centerLatLng, {
+          icon: L.divIcon({
+            className: 'zone-label',
+            html: `<span style='background:rgba(255,255,255,0.8);padding:2px 8px;border-radius:3px;font-weight:bold;color:#143c6a;border:1px solid #143c6a;'>${zone.name}</span>`,
+            iconSize: [80, 24],
+            iconAnchor: [40, 12]
+          }),
+          interactive: false
+        });
+        if (labelsVisible) {
+          if (map.hasLayer(label)) map.removeLayer(label);
+          map.addLayer(label);
+        }
+        zoneLabels.push(label);
+        return { content, layer };
+      }
       return { content, layer };
     }
 
     function loadSavedZone(zone) {
+      // Permitir cargar CircleZone además de polygon/rectangle
+      if (zone.options?.web?.type === 'circle') {
+        // Para CircleZone, crear el círculo y el label
+        if (!zone.center || !zone.radius) return;
+        const centerLatLng = gtaToLatLng(zone.center[0], zone.center[1]);
+        const layerOptions = zone.options.web?.debugColor ? { color: zone.options.web.debugColor } : undefined;
+        const layer = L.circle(centerLatLng, zone.radius / 1.5, layerOptions);
+        let content = parseCircle(zone.name, zone.center, zone.radius);
+        const popupContent = setupPopupContent(content, zone);
+        layer.bindPopup(popupContent, { minWidth: 500, interactive: true });
+        layer.on('popupclose', (e) => content = handleOnPopupClose(e, content, layer, popupContent));
+        editableLayers.addLayer(layer);
+        // El label se dibuja aquí, no en loadZoneIntoPolygon
+        let label = L.marker(centerLatLng, {
+          icon: L.divIcon({
+            className: 'zone-label',
+            html: `<span style='background:rgba(255,255,255,0.8);padding:2px 8px;border-radius:3px;font-weight:bold;color:#143c6a;border:1px solid #143c6a;'>${zone.name}</span>`,
+            iconSize: [80, 24],
+            iconAnchor: [40, 12]
+          }),
+          interactive: false
+        });
+        if (labelsVisible) {
+          map.addLayer(label);
+        }
+        zoneLabels.push(label);
+        return;
+      }
+      // Polígonos y rectángulos
       if (!zone.points || zone.points.length === 0 || (zone.options?.web?.type !== 'polygon' && zone.options?.web?.type !== 'rectangle')) return;
-
-      // Convert saved points back to Leaflet lat-lngs
-      const latlngs = zone.points.map((pt) => gtaToLatLng(pt.x, pt.y));
-
-      // Add polygon to map (and to editableLayers for editing)
+      // ...existing code...
       const loadedPolygon = loadZoneIntoPolygon(zone);
       let { content } = loadedPolygon;
       const { layer } = loadedPolygon;
       const popupContent = setupPopupContent(content, zone);
-
       layer.bindPopup(popupContent, { minWidth: 500, interactive: true });
-
       layer.on('popupclose', (e) => content = handleOnPopupClose(e, content, layer, popupContent));
-
       editableLayers.addLayer(layer);
     }
 
@@ -698,6 +954,31 @@
     }
 
     loadZonesFromLocalStorage();
+
+    // Función para mostrar/ocultar etiquetas
+    function toggleLabels() {
+      labelsVisible = !labelsVisible;
+      var btn = document.getElementById('toggleLabelsBtn');
+      btn.textContent = labelsVisible ? 'Ocultar etiquetas' : 'Mostrar etiquetas';
+      zoneLabels.forEach(label => {
+        if (labelsVisible) {
+          if (!map.hasLayer(label)) map.addLayer(label);
+        } else {
+          map.removeLayer(label);
+        }
+      });
+    }
+
+  </script>
+
+  <style>
+    .zone-label {
+      pointer-events: none;
+      font-family: sans-serif;
+      font-size: 14px;
+      text-align: center;
+    }
+  </style>
   </script>
 </body>
 
